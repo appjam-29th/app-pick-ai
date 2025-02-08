@@ -6,5 +6,5 @@ passlib[bcrypt]
 python-dotenv
 httpx
 beautifulsoup4
-openai
+openai==0.28
 requests
