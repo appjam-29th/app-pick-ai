@@ -34,10 +34,10 @@ async def get_app_recommendations_with_ai(user_request):
                     actual_app_data = fetch_itunes_app_data(app["앱 이름"])  # 실제 앱스토어 데이터 조회
                     if actual_app_data:
                         corrected_apps.append({
-                            "앱 이름": actual_app_data["앱 이름"],
-                            "앱 URL": actual_app_data["앱 URL"],
-                            "앱 아이콘 URL": actual_app_data["앱 아이콘 URL"],
-                            "강점": app["강점"]  # AI가 제공한 강점 그대로 유지
+                            "app_name": actual_app_data["앱 이름"],
+                            "app_url": actual_app_data["앱 URL"],
+                            "app_store_url": actual_app_data["앱 아이콘 URL"],
+                            "strength": app["강점"]  # AI가 제공한 강점 그대로 유지
                         })
                     else:
                         corrected_apps.append(app)  # 앱스토어에서 찾지 못한 경우 AI 데이터 유지
