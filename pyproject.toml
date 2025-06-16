@@ -17,8 +17,10 @@ passlib = { version = "^1.7", extras = ["bcrypt"] }
 python-dotenv = "^1.0"
 httpx = "^0.28"
 beautifulsoup4 = "^4.13"
-openai = "==0.28"
 requests = "^2.32"
+langchain-core = "^0.1.27"
+langchain-openai = "^0.0.8"
+starlette = "^0.36.3"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

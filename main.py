@@ -1,168 +1,143 @@
-import os
-import json
-import re
-import requests
-import openai
-from typing import List
-from fastapi import FastAPI, APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI
+from pydantic import BaseModel, RootModel
 from dotenv import load_dotenv
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 
-# .env 파일 로드
+from langchain_openai import ChatOpenAI
+from starlette.concurrency import run_in_threadpool
+import httpx
+import os
+
+# 환경 변수 로딩
 load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
 
-# OpenAI API 키 설정
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# FastAPI 애플리케이션 생성
 app = FastAPI()
 
-### 📌 데이터 모델 정의 ###
+# ============================
+# 데이터 모델 정의
+# ============================
+
 class UserRequest(BaseModel):
-    category: List[str]
+    category: list[str]
     gender: str
     age_group: str
-    values: List[str]
+    values: list[str]
     favorite_app: str
 
+# LangChain 출력용 모델
+class AppRecommendResponse(BaseModel):
+    app_name: str
+    app_store_url: str
+    app_icon_url: str
+    strength: str
 
-### 📌 OpenAI 프롬프트 생성 함수 ###
-def get_app_recommendation_prompt(user_request: UserRequest):
-    return f"""
-    사용자 정보:
-    - 카테고리: {', '.join(user_request.category)}
-    - 성별: {user_request.gender}
-    - 연령대: {user_request.age_group}
-    - 앱 추구 가치: {', '.join(user_request.values)}
-    - 최애 앱: {user_request.favorite_app}
+class AppListResponse(RootModel[list[AppRecommendResponse]]):
+    pass
 
-    위 정보를 바탕으로 한국 앱스토어의 앱을 5개 추천해주세요. JSON 형식으로 응답하세요.
-    ```json
-    [
-        {{"app_name": "앱1", "app_store_url": "앱1의 앱스토어 URL", "app_icon_url": "앱1의 아이콘 URL", "strength": "앱1의 강점"}},
-        {{"app_name": "앱2", "app_store_url": "앱2의 앱스토어 URL", "app_icon_url": "앱2의 아이콘 URL", "strength": "앱2의 강점"}},
-        {{"app_name": "앱3", "app_store_url": "앱3의 앱스토어 URL", "app_icon_url": "앱3의 아이콘 URL", "strength": "앱3의 강점"}},
-        {{"app_name": "앱4", "app_store_url": "앱4의 앱스토어 URL", "app_icon_url": "앱4의 아이콘 URL", "strength": "앱4의 강점"}},
-        {{"app_name": "앱5", "app_store_url": "앱5의 앱스토어 URL", "app_icon_url": "앱5의 아이콘 URL", "strength": "앱5의 강점"}}
-    ]
-    ```
-    """
+# ============================
+# LangChain 구성
+# ============================
 
+parser = PydanticOutputParser(pydantic_object=AppListResponse)
 
-### 📌 OpenAI를 활용한 앱 추천 기능 ###
-async def get_app_recommendations_with_ai(user_request: UserRequest):
-    prompt = get_app_recommendation_prompt(user_request)
+prompt = PromptTemplate(
+    template="""
+사용자 정보:
+- 카테고리: {category}
+- 성별: {gender}
+- 연령대: {age_group}
+- 앱 추구 가치: {values}
+- 최애 앱: {favorite_app}
 
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "system", "content": "You are a helpful assistant."},
-                      {"role": "user", "content": prompt}],
-            max_tokens=1000,
-            temperature=0.7,
-        )
+위 정보를 바탕으로 한국 앱스토어에서 인기 있는 앱 5개를 추천해 주세요.
+아래와 같은 JSON 형식으로 응답해 주세요:
 
-        ai_output = response['choices'][0]['message']['content'].strip()
-        print(ai_output)
+{format_instructions}
+""",
+    input_variables=["category", "gender", "age_group", "values", "favorite_app"],
+    partial_variables={"format_instructions": parser.get_format_instructions()}
+)
 
-        json_match = re.search(r"\[\s*\{.*?\}\s*\]", ai_output, re.DOTALL)
-        if json_match:
-            apps = json.loads(json_match.group())
+llm = ChatOpenAI(model="gpt-4o", api_key=api_key, temperature=0)
 
-            if isinstance(apps, list) and len(apps) == 5:
-                corrected_apps = []
+# Runnable 체인
+chain = prompt | llm | parser
 
-                for app in apps:
-                    actual_app_data = fetch_itunes_app_data(app["app_name"])  # 앱스토어 데이터 조회
-                    if actual_app_data:
-                        corrected_apps.append({
-                            "app_name": actual_app_data["app_name"],
-                            "app_store_url": actual_app_data["app_store_url"],
-                            "app_icon_url": actual_app_data["app_icon_url"],
-                            "strength": app["strength"]  # AI 제공 강점 유지
-                        })
-                    else:
-                        corrected_apps.append(app)  # 앱스토어에서 찾지 못한 경우 AI 데이터 유지
+# ============================
+# iTunes 앱 정보 API 호출
+# ============================
 
-                return corrected_apps
-
-            return {"error": "AI가 5개의 앱을 제공하지 않았습니다."}
-        else:
-            return {"error": "AI 응답에서 JSON 형식을 찾을 수 없습니다."}
-    except Exception as e:
-        return {"error": f"AI 응답 처리 중 오류 발생: {e}"}
-
-
-### 📌 iTunes API를 활용한 앱스토어 데이터 조회 ###
-def fetch_itunes_app_data(app_name, country="KR"):
-    """
-    iTunes Search API를 사용하여 앱 정보를 조회합니다.
-    """
+async def fetch_itunes_app_data(app_name: str, country="KR"):
     url = "https://itunes.apple.com/search"
     params = {
         "term": app_name,
         "country": country,
         "media": "software",
-        "limit": 1  # 가장 연관된 앱 1개만 가져옴
+        "limit": 1
     }
-
-    response = requests.get(url, params=params)
-
-    if response.status_code == 200:
-        data = response.json()
-        if data.get("results"):
-            app_info = data["results"][0]
-            return {
-                "app_name": app_info.get("trackName"),
-                "app_store_url": app_info.get("trackViewUrl"),
-                "app_icon_url": app_info.get("artworkUrl512"),
-                "app_id": app_info.get("trackId")
-            }
-    return None  # 검색 결과가 없을 경우
-
-
-### 📌 앱 아이콘 URL 검증 및 최신 아이콘 가져오기 ###
-def get_latest_app_icon(app_url: str) -> str:
-    """
-    앱스토어 URL에서 앱 ID를 추출하여 최신 아이콘 URL을 가져옵니다.
-    """
-    try:
-        match = re.search(r"id(\d+)", app_url)
-        if not match:
-            return app_url  # 앱스토어 링크가 아니면 원래 URL 반환
-        
-        app_id = match.group(1)
-        lookup_url = f"https://itunes.apple.com/lookup?id={app_id}"
-        response = requests.get(lookup_url, timeout=5)
-        data = response.json()
-
-        if data.get("resultCount", 0) > 0:
-            return data["results"][0].get("artworkUrl512", app_url)  # 최신 아이콘 URL 반환
-    except Exception as e:
-        print(f"iTunes API 오류: {e}")
-    return app_url  # 실패 시 원래 URL 반환
-
-
-### 📌 이미지 URL 검증 ###
-def validate_image_url(image_url: str) -> str:
-    """
-    이미지 URL이 정상적으로 응답하는지 확인.
-    만약 404가 발생하면 기본 아이콘 URL을 반환.
-    """
-    try:
-        response = requests.head(image_url, allow_redirects=True, timeout=3)
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, params=params)
         if response.status_code == 200:
-            return image_url
-    except requests.RequestException:
-        pass
-    return "https://upload.wikimedia.org/wikipedia/commons/a/ac/No_image_available.svg"  # 기본 아이콘
+            data = response.json()
+            if data.get("results"):
+                app_info = data["results"][0]
+                return {
+                    "app_name": app_info.get("trackName"),
+                    "app_store_url": app_info.get("trackViewUrl"),
+                    "app_icon_url": app_info.get("artworkUrl512"),
+                }
+    return None
 
+# ============================
+# FastAPI 엔드포인트 비즈니스 로직 함수화
+# ============================
 
-### 📌 API 엔드포인트 정의 ###
-@app.get("/")
-async def root():
-    return {"message": "앱 추천 서비스를 환영합니다!"}
+def process_app_recommendation(request: UserRequest):
+    input_data = {
+        "category": ", ".join(request.category),
+        "gender": request.gender,
+        "age_group": request.age_group,
+        "values": ", ".join(request.values),
+        "favorite_app": request.favorite_app
+    }
+    # LangChain Runnable 실행은 sync -> thread pool에서 실행
+    try:
+        result: AppListResponse = chain.invoke(input_data)
+    except Exception as e:
+        raise RuntimeError(f"AI 호출 중 오류 발생: {str(e)}")
+
+    # iTunes 데이터 보강
+    import asyncio
+    async def enhance():
+        enhanced_apps = []
+        for app in result.root:
+            itunes_data = await fetch_itunes_app_data(app.app_name)
+            if itunes_data:
+                enhanced_apps.append({
+                    "app_name": itunes_data["app_name"],
+                    "app_store_url": itunes_data["app_store_url"],
+                    "app_icon_url": itunes_data["app_icon_url"],
+                    "strength": app.strength
+                })
+            else:
+                enhanced_apps.append(app.dict())
+        return enhanced_apps
+    return asyncio.run(enhance())
+
+# ============================
+# FastAPI 엔드포인트
+# ============================
 
 @app.post("/recommend_apps/")
 async def recommend_apps(request: UserRequest):
-    return await get_app_recommendations_with_ai(request)
+    try:
+        # 비즈니스 로직 함수 호출 (비동기 보강)
+        import asyncio
+        loop = asyncio.get_event_loop()
+        enhanced_apps = await loop.run_in_executor(None, process_app_recommendation, request)
+        return enhanced_apps
+    except Exception as e:
+        return {"error": str(e)}
